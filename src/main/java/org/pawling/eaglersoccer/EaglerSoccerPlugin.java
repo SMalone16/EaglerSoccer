@@ -447,7 +447,17 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sendUsage(sender, label);
+            if (!(sender instanceof Player player)) {
+                sendUsage(sender, label);
+                return true;
+            }
+
+            teleportPlayerToField(player);
+            return true;
+        }
+
+        if (!sender.hasPermission("eaglersoccer.admin")) {
+            sender.sendMessage(ChatColor.RED + "Use /" + label + " to teleport to the soccer field.");
             return true;
         }
 
@@ -485,11 +495,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
                     sender.sendMessage("Only a player can teleport to the field.");
                     return true;
                 }
-                if (fieldCenter == null) {
-                    sender.sendMessage(ChatColor.RED + "The soccer field is not ready yet.");
-                    return true;
-                }
-                player.teleport(fieldCenter.clone().add(0, 1, 0));
+                teleportPlayerToField(player);
                 return true;
             }
             default -> {
@@ -497,6 +503,16 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
                 return true;
             }
         }
+    }
+
+    private void teleportPlayerToField(Player player) {
+        if (fieldCenter == null) {
+            player.sendMessage(ChatColor.RED + "The soccer field is not ready yet.");
+            return;
+        }
+
+        player.teleport(fieldCenter.clone().add(0, 1, 0));
+        player.sendMessage(ChatColor.GREEN + "Teleported to the soccer field.");
     }
 
     private void sendUsage(CommandSender sender, String label) {
@@ -509,6 +525,9 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (!sender.hasPermission("eaglersoccer.admin")) {
+            return List.of();
+        }
         if (args.length == 1) {
             return List.of("setup", "tp", "reset", "score", "resetscore");
         }

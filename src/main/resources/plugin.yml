@@ -1,0 +1,17 @@
+name: EaglerSoccer
+version: '1.0.0'
+main: org.pawling.eaglersoccer.EaglerSoccerPlugin
+api-version: '1.21.11'
+author: Pawling CSD Game Development
+description: Legacy-client-compatible soccer field and ball physics for the classroom Eaglercraft server.
+
+commands:
+  soccer:
+    description: EaglerSoccer setup and testing tools
+    usage: /soccer <setup|tp|reset|score|resetscore>
+    permission: eaglersoccer.admin
+
+permissions:
+  eaglersoccer.admin:
+    description: Allows EaglerSoccer administration commands
+    default: op

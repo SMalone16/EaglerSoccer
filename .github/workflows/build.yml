@@ -1,0 +1,50 @@
+name: Build EaglerSoccer
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'dist/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build plugin
+        run: mvn -B clean package
+
+      - name: Stage distributable JAR
+        run: |
+          mkdir -p dist
+          cp target/EaglerSoccer-1.0.0.jar dist/EaglerSoccer-1.0.0.jar
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EaglerSoccer-1.0.0
+          path: dist/EaglerSoccer-1.0.0.jar
+
+      - name: Keep latest JAR in repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dist/EaglerSoccer-1.0.0.jar
+          if ! git diff --cached --quiet; then
+            git commit -m "Build EaglerSoccer 1.0.0"
+            git push
+          fi

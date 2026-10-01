@@ -17,7 +17,13 @@ The original design called for an armadillo, but ViaBackwards substitutes armadi
 
 ## Commands
 
-Operators can use:
+All players can teleport directly to the soccer field with:
+
+```text
+/soccer
+```
+
+Operators can also use the administration tools:
 
 ```text
 /soccer tp

@@ -7,9 +7,8 @@ description: Legacy-client-compatible soccer field and ball physics for the clas
 
 commands:
   soccer:
-    description: EaglerSoccer setup and testing tools
-    usage: /soccer <setup|tp|reset|score|resetscore>
-    permission: eaglersoccer.admin
+    description: Teleport to the soccer field; operators can also use administration tools
+    usage: /soccer
 
 permissions:
   eaglersoccer.admin:

@@ -618,12 +618,13 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
 
         for (Entity entity : fieldWorld.getNearbyEntities(fieldCenter, halfWidth + 12, 12, halfLength + 12)) {
+            if (entity.equals(ball)) {
+                continue;
+            }
             if (isSoccerBall(entity)) {
                 entity.remove();
             }
         }
-
-        ball = null;
     }
 
     @EventHandler

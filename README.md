@@ -75,7 +75,7 @@ The project targets:
 GitHub Actions builds:
 
 ```text
-dist/EaglerSoccer-1.0.0.jar
+dist/EaglerSoccer-1.1.0.jar
 ```
 
 The classroom server can install that JAR in `server/plugins/`.

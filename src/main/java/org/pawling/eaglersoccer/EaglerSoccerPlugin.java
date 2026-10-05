@@ -129,6 +129,14 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         boolean legacyField = getConfig().getBoolean("field.built", false)
                 && getConfig().getInt("field.layout-version", 0) < FIELD_LAYOUT_VERSION;
 
+        // Existing plugin config files survive JAR replacement. Force old installations
+        // onto the compact layout instead of inheriting the original 25 x 41 values.
+        if (legacyField) {
+            getConfig().set("field-width", 13);
+            getConfig().set("field-length", 23);
+            getConfig().set("goal-width", 5);
+        }
+
         Location spawn = world.getSpawnLocation();
         int centerX = legacyField
                 ? getConfig().getInt("field.center-x")
@@ -164,6 +172,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
             if (legacyField) {
                 queueLegacyMarkerCleanup(changes, world, centerX, surfaceY, centerZ);
+                queueLegacySupportRemoval(changes, centerX, surfaceY, centerZ, halfWidth, halfLength);
             }
 
             queuePitchBuild(changes, centerX, surfaceY, centerZ, halfWidth, halfLength);
@@ -281,6 +290,21 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
         queueGoalRemoval(changes, centerX, y, centerZ - LEGACY_HALF_LENGTH - 1, oldGoalHalf, oldGoalHeight);
         queueGoalRemoval(changes, centerX, y, centerZ + LEGACY_HALF_LENGTH + 1, oldGoalHalf, oldGoalHeight);
+    }
+
+    private void queueLegacySupportRemoval(Queue<BlockChange> changes, int centerX, int y, int centerZ,
+                                           int halfWidth, int halfLength) {
+        // The original build wrote a full DIRT support layer at y - 1.
+        // Clear that support only beneath the new compact pitch so the playable
+        // platform is truly one block thick without excavating the entire legacy footprint.
+        int outerWidth = halfWidth + 1;
+        int outerLength = halfLength + 2;
+
+        for (int dx = -outerWidth; dx <= outerWidth; dx++) {
+            for (int dz = -outerLength; dz <= outerLength; dz++) {
+                changes.add(new BlockChange(centerX + dx, y - 1, centerZ + dz, Material.AIR));
+            }
+        }
     }
 
     private void queueGoalRemoval(Queue<BlockChange> changes, int centerX, int y, int goalZ,

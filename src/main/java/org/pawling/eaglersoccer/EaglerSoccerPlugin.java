@@ -2,6 +2,7 @@ package org.pawling.eaglersoccer;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Chunk;
 import org.bukkit.GameMode;
 import org.bukkit.HeightMap;
 import org.bukkit.Location;
@@ -21,17 +22,24 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
-import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, TabExecutor {
+
+    private static final int FIELD_LAYOUT_VERSION = 2;
+    private static final int LEGACY_HALF_WIDTH = 12;
+    private static final int LEGACY_HALF_LENGTH = 20;
 
     private NamespacedKey ballKey;
     private World fieldWorld;
@@ -43,6 +51,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     private final Map<UUID, Long> lastKickAt = new HashMap<>();
     private boolean resettingBall = false;
+    private boolean fieldBuilding = false;
 
     @Override
     public void onEnable() {
@@ -56,15 +65,13 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             getCommand("soccer").setTabCompleter(this);
         }
 
-        // Let the world finish loading before restoring/building the pitch.
         getServer().getScheduler().runTaskLater(this, () -> {
-            if (loadSavedField()) {
-                findOrSpawnBall();
-            } else {
-                setupField(false);
+            if (!loadSavedField()) {
+                setupField(false, null);
             }
 
-            getServer().getScheduler().runTaskTimer(this, this::tickSoccer, 1L, 1L);
+            long period = Math.max(2L, getConfig().getLong("soccer-task-period-ticks", 2L));
+            getServer().getScheduler().runTaskTimer(this, this::tickSoccer, period, period);
         }, 60L);
 
         getLogger().info("EaglerSoccer enabled.");
@@ -73,10 +80,16 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public void onDisable() {
         lastKickAt.clear();
+        despawnActiveBall();
     }
 
     private boolean loadSavedField() {
         if (!getConfig().getBoolean("field.built", false)) {
+            return false;
+        }
+
+        if (getConfig().getInt("field.layout-version", 0) != FIELD_LAYOUT_VERSION) {
+            getLogger().info("Older soccer field layout detected; rebuilding the smaller performance-safe field.");
             return false;
         }
 
@@ -96,84 +109,243 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         return true;
     }
 
-    private void setupField(boolean forceRebuild) {
-        World world = Bukkit.getWorld(getConfig().getString("world", "world"));
-        if (world == null) {
-            getLogger().severe("Cannot create soccer field: configured world is not loaded.");
+    private void setupField(boolean forceRebuild, CommandSender requester) {
+        if (fieldBuilding) {
+            if (requester != null) {
+                requester.sendMessage(ChatColor.YELLOW + "The soccer field is already being prepared.");
+            }
             return;
         }
 
-        Location spawn = world.getSpawnLocation();
-        int centerX = spawn.getBlockX();
-        int centerZ = spawn.getBlockZ() - getConfig().getInt("distance-north-of-spawn", 100);
+        World world = Bukkit.getWorld(getConfig().getString("world", "world"));
+        if (world == null) {
+            getLogger().severe("Cannot create soccer field: configured world is not loaded.");
+            if (requester != null) {
+                requester.sendMessage(ChatColor.RED + "The configured soccer world is not loaded.");
+            }
+            return;
+        }
 
-        int width = makeOddAtLeast(getConfig().getInt("field-width", 25), 15);
-        int length = makeOddAtLeast(getConfig().getInt("field-length", 41), 25);
+        boolean legacyField = getConfig().getBoolean("field.built", false)
+                && getConfig().getInt("field.layout-version", 0) < FIELD_LAYOUT_VERSION;
+
+        // Existing plugin config files survive JAR replacement. Force old installations
+        // onto the compact layout instead of inheriting the original 25 x 41 values.
+        if (legacyField) {
+            getConfig().set("field-width", 13);
+            getConfig().set("field-length", 23);
+            getConfig().set("goal-width", 5);
+        }
+
+        Location spawn = world.getSpawnLocation();
+        int centerX = legacyField
+                ? getConfig().getInt("field.center-x")
+                : spawn.getBlockX();
+        int centerZ = legacyField
+                ? getConfig().getInt("field.center-z")
+                : spawn.getBlockZ() - getConfig().getInt("distance-north-of-spawn", 100);
+
+        int width = makeOddAtLeast(getConfig().getInt("field-width", 13), 9);
+        int length = makeOddAtLeast(getConfig().getInt("field-length", 23), 15);
         int halfWidth = width / 2;
         int halfLength = length / 2;
 
-        int surfaceY;
-        if (!forceRebuild && getConfig().getBoolean("field.built", false)) {
-            surfaceY = getConfig().getInt("field.center-y");
-        } else {
-            surfaceY = calculateFieldSurfaceY(world, centerX, centerZ, halfWidth, halfLength);
+        int preloadHalfWidth = legacyField ? Math.max(halfWidth + 1, LEGACY_HALF_WIDTH + 2) : halfWidth + 1;
+        int preloadHalfLength = legacyField ? Math.max(halfLength + 2, LEGACY_HALF_LENGTH + 5) : halfLength + 2;
+
+        fieldBuilding = true;
+        despawnActiveBall();
+
+        if (requester != null) {
+            requester.sendMessage(ChatColor.YELLOW + "Preparing soccer field chunks safely...");
         }
 
-        buildPitch(world, centerX, surfaceY, centerZ, halfWidth, halfLength);
+        preloadArea(world, centerX, centerZ, preloadHalfWidth, preloadHalfLength, () -> {
+            int surfaceY;
+            if (legacyField && !forceRebuild) {
+                surfaceY = getConfig().getInt("field.center-y");
+            } else {
+                surfaceY = calculateFieldSurfaceY(world, centerX, centerZ, halfWidth, halfLength);
+            }
 
-        fieldWorld = world;
-        fieldCenter = new Location(world, centerX + 0.5, surfaceY + 1.05, centerZ + 0.5);
+            Queue<BlockChange> changes = new ArrayDeque<>();
 
-        getConfig().set("field.built", true);
-        getConfig().set("field.center-x", centerX);
-        getConfig().set("field.center-y", surfaceY);
-        getConfig().set("field.center-z", centerZ);
-        saveConfig();
+            if (legacyField) {
+                queueLegacyMarkerCleanup(changes, world, centerX, surfaceY, centerZ);
+                queueLegacySupportRemoval(changes, centerX, surfaceY, centerZ, halfWidth, halfLength);
+            }
 
-        removeTaggedBalls(world);
-        spawnBall();
+            queuePitchBuild(changes, centerX, surfaceY, centerZ, halfWidth, halfLength);
 
-        getLogger().info("Soccer field ready at " + centerX + ", " + surfaceY + ", " + centerZ + ".");
+            int blocksPerTick = Math.max(50, getConfig().getInt("build-blocks-per-tick", 180));
+            applyBlockChangesBatched(world, changes, blocksPerTick, () -> {
+                fieldWorld = world;
+                fieldCenter = new Location(world, centerX + 0.5, surfaceY + 1.05, centerZ + 0.5);
+
+                getConfig().set("field.built", true);
+                getConfig().set("field.layout-version", FIELD_LAYOUT_VERSION);
+                getConfig().set("field.center-x", centerX);
+                getConfig().set("field.center-y", surfaceY);
+                getConfig().set("field.center-z", centerZ);
+                saveConfig();
+
+                removeTaggedBallsNearField();
+                fieldBuilding = false;
+
+                getLogger().info("Soccer field ready at " + centerX + ", " + surfaceY + ", " + centerZ
+                        + " (" + width + "x" + length + ", single-layer layout).");
+
+                if (requester != null) {
+                    requester.sendMessage(ChatColor.GREEN + "Soccer field rebuilt: "
+                            + width + " x " + length + ", single layer.");
+                }
+            });
+        }, () -> {
+            fieldBuilding = false;
+            if (requester != null) {
+                requester.sendMessage(ChatColor.RED + "Could not prepare the soccer field chunks. Check the server log.");
+            }
+        });
+    }
+
+    private void preloadArea(World world, int centerX, int centerZ, int halfWidth, int halfLength,
+                             Runnable onReady, Runnable onFailure) {
+        int minChunkX = (centerX - halfWidth) >> 4;
+        int maxChunkX = (centerX + halfWidth) >> 4;
+        int minChunkZ = (centerZ - halfLength) >> 4;
+        int maxChunkZ = (centerZ + halfLength) >> 4;
+
+        List<CompletableFuture<Chunk>> futures = new ArrayList<>();
+
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                futures.add(world.getChunkAtAsync(chunkX, chunkZ));
+            }
+        }
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .whenComplete((ignored, error) -> {
+                    if (!isEnabled()) {
+                        return;
+                    }
+
+                    getServer().getScheduler().runTask(this, () -> {
+                        if (error != null) {
+                            getLogger().severe("Failed to preload soccer field chunks: " + error.getMessage());
+                            onFailure.run();
+                        } else {
+                            onReady.run();
+                        }
+                    });
+                });
     }
 
     private int calculateFieldSurfaceY(World world, int centerX, int centerZ, int halfWidth, int halfLength) {
         int highest = Math.max(world.getSeaLevel(), 4);
 
-        for (int x = centerX - halfWidth - 3; x <= centerX + halfWidth + 3; x += 2) {
-            for (int z = centerZ - halfLength - 6; z <= centerZ + halfLength + 6; z += 2) {
+        for (int x = centerX - halfWidth - 1; x <= centerX + halfWidth + 1; x += 2) {
+            for (int z = centerZ - halfLength - 2; z <= centerZ + halfLength + 2; z += 2) {
                 highest = Math.max(highest, world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES));
             }
         }
 
-        // Old Eaglercraft clients cannot reliably represent the modern extended world height.
         return Math.max(4, Math.min(248, highest + 1));
     }
 
-    private void buildPitch(World world, int centerX, int y, int centerZ, int halfWidth, int halfLength) {
-        int outerWidth = halfWidth + 2;
-        int outerLength = halfLength + 5;
+    private void queuePitchBuild(Queue<BlockChange> changes, int centerX, int y, int centerZ,
+                                 int halfWidth, int halfLength) {
+        int outerWidth = halfWidth + 1;
+        int outerLength = halfLength + 2;
 
         for (int dx = -outerWidth; dx <= outerWidth; dx++) {
             for (int dz = -outerLength; dz <= outerLength; dz++) {
-                int x = centerX + dx;
-                int z = centerZ + dz;
-
-                world.getBlockAt(x, y - 1, z).setType(Material.DIRT, false);
-
                 boolean insidePitch = Math.abs(dx) <= halfWidth && Math.abs(dz) <= halfLength;
-                Material surface = insidePitch ? pitchSurfaceFor(dx, dz, halfWidth, halfLength) : Material.GRASS_BLOCK;
-                world.getBlockAt(x, y, z).setType(surface, false);
+                Material surface = insidePitch
+                        ? pitchSurfaceFor(dx, dz, halfWidth, halfLength)
+                        : Material.GRASS_BLOCK;
 
-                for (int clearY = y + 1; clearY <= y + 5; clearY++) {
-                    world.getBlockAt(x, clearY, z).setType(Material.AIR, false);
+                changes.add(new BlockChange(centerX + dx, y, centerZ + dz, surface));
+            }
+        }
+
+        int goalWidth = makeOddAtLeast(getConfig().getInt("goal-width", 5), 3);
+        int goalHeight = Math.max(2, getConfig().getInt("goal-height", 3));
+        queueGoal(changes, centerX, y, centerZ - halfLength - 1, goalWidth, goalHeight, Material.BLUE_WOOL);
+        queueGoal(changes, centerX, y, centerZ + halfLength + 1, goalWidth, goalHeight, Material.RED_WOOL);
+    }
+
+    private void queueLegacyMarkerCleanup(Queue<BlockChange> changes, World world,
+                                          int centerX, int y, int centerZ) {
+        for (int dx = -LEGACY_HALF_WIDTH - 2; dx <= LEGACY_HALF_WIDTH + 2; dx++) {
+            for (int dz = -LEGACY_HALF_LENGTH - 5; dz <= LEGACY_HALF_LENGTH + 5; dz++) {
+                Block block = world.getBlockAt(centerX + dx, y, centerZ + dz);
+                if (block.getType() == Material.WHITE_WOOL) {
+                    changes.add(new BlockChange(centerX + dx, y, centerZ + dz, Material.GRASS_BLOCK));
                 }
             }
         }
 
-        int goalWidth = makeOddAtLeast(getConfig().getInt("goal-width", 7), 3);
-        int goalHeight = Math.max(2, getConfig().getInt("goal-height", 3));
-        buildGoal(world, centerX, y, centerZ - halfLength - 1, goalWidth, goalHeight, Material.BLUE_WOOL);
-        buildGoal(world, centerX, y, centerZ + halfLength + 1, goalWidth, goalHeight, Material.RED_WOOL);
+        int oldGoalHalf = 3;
+        int oldGoalHeight = 3;
+
+        queueGoalRemoval(changes, centerX, y, centerZ - LEGACY_HALF_LENGTH - 1, oldGoalHalf, oldGoalHeight);
+        queueGoalRemoval(changes, centerX, y, centerZ + LEGACY_HALF_LENGTH + 1, oldGoalHalf, oldGoalHeight);
+    }
+
+    private void queueLegacySupportRemoval(Queue<BlockChange> changes, int centerX, int y, int centerZ,
+                                           int halfWidth, int halfLength) {
+        // The original build wrote a full DIRT support layer at y - 1.
+        // Clear that support only beneath the new compact pitch so the playable
+        // platform is truly one block thick without excavating the entire legacy footprint.
+        int outerWidth = halfWidth + 1;
+        int outerLength = halfLength + 2;
+
+        for (int dx = -outerWidth; dx <= outerWidth; dx++) {
+            for (int dz = -outerLength; dz <= outerLength; dz++) {
+                changes.add(new BlockChange(centerX + dx, y - 1, centerZ + dz, Material.AIR));
+            }
+        }
+    }
+
+    private void queueGoalRemoval(Queue<BlockChange> changes, int centerX, int y, int goalZ,
+                                  int halfGoal, int goalHeight) {
+        int leftX = centerX - halfGoal;
+        int rightX = centerX + halfGoal;
+
+        for (int dy = 1; dy <= goalHeight; dy++) {
+            changes.add(new BlockChange(leftX, y + dy, goalZ, Material.AIR));
+            changes.add(new BlockChange(rightX, y + dy, goalZ, Material.AIR));
+        }
+
+        for (int x = leftX; x <= rightX; x++) {
+            changes.add(new BlockChange(x, y + goalHeight, goalZ, Material.AIR));
+        }
+    }
+
+    private void applyBlockChangesBatched(World world, Queue<BlockChange> changes,
+                                          int blocksPerTick, Runnable onComplete) {
+        getServer().getScheduler().runTask(this, new Runnable() {
+            @Override
+            public void run() {
+                int applied = 0;
+
+                while (applied < blocksPerTick && !changes.isEmpty()) {
+                    BlockChange change = changes.poll();
+                    Block block = world.getBlockAt(change.x(), change.y(), change.z());
+
+                    if (block.getType() != change.material()) {
+                        block.setType(change.material(), false);
+                    }
+                    applied++;
+                }
+
+                if (changes.isEmpty()) {
+                    onComplete.run();
+                } else {
+                    getServer().getScheduler().runTaskLater(EaglerSoccerPlugin.this, this, 1L);
+                }
+            }
+        });
     }
 
     private Material pitchSurfaceFor(int dx, int dz, int halfWidth, int halfLength) {
@@ -187,28 +359,42 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         return Material.GRASS_BLOCK;
     }
 
-    private void buildGoal(World world, int centerX, int y, int goalZ, int goalWidth, int goalHeight, Material material) {
+    private void queueGoal(Queue<BlockChange> changes, int centerX, int y, int goalZ,
+                           int goalWidth, int goalHeight, Material material) {
         int halfGoal = goalWidth / 2;
         int leftX = centerX - halfGoal;
         int rightX = centerX + halfGoal;
 
         for (int dy = 1; dy <= goalHeight; dy++) {
-            world.getBlockAt(leftX, y + dy, goalZ).setType(material, false);
-            world.getBlockAt(rightX, y + dy, goalZ).setType(material, false);
+            changes.add(new BlockChange(leftX, y + dy, goalZ, material));
+            changes.add(new BlockChange(rightX, y + dy, goalZ, material));
         }
 
         for (int x = leftX; x <= rightX; x++) {
-            world.getBlockAt(x, y + goalHeight, goalZ).setType(material, false);
+            changes.add(new BlockChange(x, y + goalHeight, goalZ, material));
         }
     }
 
     private void tickSoccer() {
-        if (fieldWorld == null || fieldCenter == null) {
+        if (fieldBuilding || fieldWorld == null || fieldCenter == null) {
+            return;
+        }
+
+        if (!hasPlayersNearField()) {
+            despawnActiveBall();
+            return;
+        }
+
+        int centerChunkX = fieldCenter.getBlockX() >> 4;
+        int centerChunkZ = fieldCenter.getBlockZ() >> 4;
+        if (!fieldWorld.isChunkLoaded(centerChunkX, centerChunkZ)) {
+            ball = null;
             return;
         }
 
         if (ball == null || !ball.isValid() || ball.isDead()) {
-            findOrSpawnBall();
+            ball = null;
+            spawnBall();
             if (ball == null) {
                 return;
             }
@@ -217,6 +403,23 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         processPlayerContact();
         applyGroundFriction();
         checkGoalOrOutOfBounds();
+    }
+
+    private boolean hasPlayersNearField() {
+        double activeRadius = Math.max(24.0, getConfig().getDouble("active-radius", 48.0));
+        double radiusSquared = activeRadius * activeRadius;
+
+        for (Player player : fieldWorld.getPlayers()) {
+            if (player.getGameMode() == GameMode.SPECTATOR) {
+                continue;
+            }
+
+            if (player.getLocation().distanceSquared(fieldCenter) <= radiusSquared) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void processPlayerContact() {
@@ -281,8 +484,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         }
 
         Vector velocity = ball.getVelocity();
-        double x = velocity.getX() * 0.94;
-        double z = velocity.getZ() * 0.94;
+        double x = velocity.getX() * 0.89;
+        double z = velocity.getZ() * 0.89;
 
         if (Math.abs(x) < 0.015) {
             x = 0;
@@ -297,9 +500,9 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     private void checkGoalOrOutOfBounds() {
         Location location = ball.getLocation();
 
-        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 25), 15) / 2;
-        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 41), 25) / 2;
-        int goalHalf = makeOddAtLeast(getConfig().getInt("goal-width", 7), 3) / 2;
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+        int goalHalf = makeOddAtLeast(getConfig().getInt("goal-width", 5), 3) / 2;
 
         double dx = location.getX() - fieldCenter.getX();
         double dz = location.getZ() - fieldCenter.getZ();
@@ -320,8 +523,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             return;
         }
 
-        boolean farOut = Math.abs(dx) > halfWidth + 4
-                || Math.abs(dz) > halfLength + 7
+        boolean farOut = Math.abs(dx) > halfWidth + 3
+                || Math.abs(dz) > halfLength + 4
                 || location.getY() < fieldCenter.getY() - 8
                 || location.getY() > 255;
 
@@ -339,13 +542,17 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         Bukkit.broadcastMessage(message);
 
         for (Player player : fieldWorld.getPlayers()) {
-            if (player.getLocation().distanceSquared(fieldCenter) <= 80 * 80) {
+            if (player.getLocation().distanceSquared(fieldCenter) <= 64 * 64) {
                 player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.9f, 1.15f);
             }
         }
     }
 
     private void resetBallAfterGoal() {
+        if (ball == null || !ball.isValid()) {
+            return;
+        }
+
         resettingBall = true;
         ball.setVelocity(new Vector(0, 0, 0));
         ball.teleport(ballSpawnLocation());
@@ -354,7 +561,13 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void resetBallImmediately() {
+        if (fieldWorld == null || fieldCenter == null || !hasPlayersNearField()) {
+            despawnActiveBall();
+            return;
+        }
+
         if (ball == null || !ball.isValid()) {
+            ball = null;
             spawnBall();
             return;
         }
@@ -364,24 +577,14 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         ball.setFallDistance(0);
     }
 
-    private void findOrSpawnBall() {
-        if (fieldWorld == null || fieldCenter == null) {
+    private void spawnBall() {
+        if (fieldWorld == null || fieldCenter == null || !hasPlayersNearField()) {
             return;
         }
 
-        for (Entity entity : fieldWorld.getNearbyEntities(fieldCenter, 50, 15, 60)) {
-            if (entity instanceof Slime slime && isSoccerBall(slime)) {
-                configureBall(slime);
-                ball = slime;
-                return;
-            }
-        }
-
-        spawnBall();
-    }
-
-    private void spawnBall() {
-        if (fieldWorld == null || fieldCenter == null) {
+        int centerChunkX = fieldCenter.getBlockX() >> 4;
+        int centerChunkZ = fieldCenter.getBlockZ() >> 4;
+        if (!fieldWorld.isChunkLoaded(centerChunkX, centerChunkZ)) {
             return;
         }
 
@@ -403,11 +606,22 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         slime.setGravity(true);
         slime.setSilent(true);
         slime.setInvulnerable(true);
-        slime.setPersistent(true);
-        slime.setRemoveWhenFarAway(false);
+
+        // Session-only entity: never save soccer balls into chunk data.
+        slime.setPersistent(false);
+        slime.setRemoveWhenFarAway(true);
+
         slime.setCollidable(true);
         slime.setCustomName(ChatColor.WHITE + "Soccer Ball");
         slime.setCustomNameVisible(false);
+    }
+
+    private void despawnActiveBall() {
+        if (ball != null && ball.isValid()) {
+            ball.remove();
+        }
+        ball = null;
+        resettingBall = false;
     }
 
     private Location ballSpawnLocation() {
@@ -419,13 +633,22 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         return value != null && value == (byte) 1;
     }
 
-    private void removeTaggedBalls(World world) {
-        for (Entity entity : world.getEntities()) {
+    private void removeTaggedBallsNearField() {
+        if (fieldWorld == null || fieldCenter == null) {
+            return;
+        }
+
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+
+        for (Entity entity : fieldWorld.getNearbyEntities(fieldCenter, halfWidth + 12, 12, halfLength + 12)) {
+            if (entity.equals(ball)) {
+                continue;
+            }
             if (isSoccerBall(entity)) {
                 entity.remove();
             }
         }
-        ball = null;
     }
 
     @EventHandler
@@ -440,7 +663,10 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (isSoccerBall(event.getEntity())) {
             event.getDrops().clear();
             event.setDroppedExp(0);
-            getServer().getScheduler().runTaskLater(this, this::spawnBall, 1L);
+
+            if (event.getEntity().equals(ball)) {
+                ball = null;
+            }
         }
     }
 
@@ -463,12 +689,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
         switch (args[0].toLowerCase()) {
             case "setup" -> {
-                setupField(true);
-                sender.sendMessage(ChatColor.GREEN + "Soccer field rebuilt 100 blocks north of spawn.");
+                setupField(true, sender);
                 return true;
             }
             case "reset" -> {
-                if (fieldCenter == null) {
+                if (fieldCenter == null || fieldBuilding) {
                     sender.sendMessage(ChatColor.RED + "The soccer field is not ready yet.");
                 } else {
                     resetBallImmediately();
@@ -506,13 +731,34 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private void teleportPlayerToField(Player player) {
-        if (fieldCenter == null) {
+        if (fieldCenter == null || fieldBuilding) {
             player.sendMessage(ChatColor.RED + "The soccer field is not ready yet.");
             return;
         }
 
-        player.teleport(fieldCenter.clone().add(0, 1, 0));
-        player.sendMessage(ChatColor.GREEN + "Teleported to the soccer field.");
+        Location target = fieldCenter.clone().add(0, 1, 0);
+        player.sendMessage(ChatColor.YELLOW + "Loading the soccer field...");
+
+        player.teleportAsync(target).whenComplete((success, error) -> {
+            if (!isEnabled()) {
+                return;
+            }
+
+            getServer().getScheduler().runTask(this, () -> {
+                if (error != null || !Boolean.TRUE.equals(success)) {
+                    player.sendMessage(ChatColor.RED + "Could not teleport to the soccer field.");
+                    if (error != null) {
+                        getLogger().warning("Async soccer teleport failed for " + player.getName()
+                                + ": " + error.getMessage());
+                    }
+                    return;
+                }
+
+                // Any persistent balls left by pre-1.1 builds are now in loaded chunks and can be removed safely.
+                removeTaggedBallsNearField();
+                player.sendMessage(ChatColor.GREEN + "Teleported to the soccer field.");
+            });
+        });
     }
 
     private void sendUsage(CommandSender sender, String label) {
@@ -543,5 +789,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         double dx = a.getX() - b.getX();
         double dz = a.getZ() - b.getZ();
         return dx * dx + dz * dz;
+    }
+
+    private record BlockChange(int x, int y, int z, Material material) {
     }
 }

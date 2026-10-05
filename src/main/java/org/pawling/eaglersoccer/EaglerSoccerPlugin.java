@@ -20,17 +20,18 @@ import org.bukkit.entity.Player;
 import org.bukkit.entity.Slime;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
+import org.bukkit.event.player.PlayerInteractAtEntityEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -49,7 +50,9 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     private int blueScore = 0;
     private int redScore = 0;
 
-    private final Map<UUID, Long> lastKickAt = new HashMap<>();
+    private UUID lastShooter;
+    private long lastShotAtMs = 0L;
+    private long shooterCollisionGraceUntilMs = 0L;
     private boolean resettingBall = false;
     private boolean fieldBuilding = false;
 
@@ -70,7 +73,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
                 setupField(false, null);
             }
 
-            long period = Math.max(2L, getConfig().getLong("soccer-task-period-ticks", 2L));
+            long period = Math.max(1L, getConfig().getLong("soccer-task-period-ticks", 1L));
             getServer().getScheduler().runTaskTimer(this, this::tickSoccer, period, period);
         }, 60L);
 
@@ -79,7 +82,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     @Override
     public void onDisable() {
-        lastKickAt.clear();
+        lastShooter = null;
         despawnActiveBall();
     }
 
@@ -400,7 +403,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             }
         }
 
-        processPlayerContact();
+        processPlayerCollisionStops();
         applyGroundFriction();
         checkGoalOrOutOfBounds();
     }
@@ -422,60 +425,109 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         return false;
     }
 
-    private void processPlayerContact() {
-        double radius = Math.max(0.6, getConfig().getDouble("contact-radius", 1.20));
-        long cooldown = Math.max(100L, getConfig().getLong("kick-cooldown-ms", 220L));
+    private void processPlayerCollisionStops() {
+        Vector velocity = ball.getVelocity();
+        double horizontalSpeedSquared = velocity.getX() * velocity.getX() + velocity.getZ() * velocity.getZ();
+        double minimumMovingSpeed = Math.max(0.005, getConfig().getDouble("minimum-moving-speed", 0.02));
+
+        if (horizontalSpeedSquared < minimumMovingSpeed * minimumMovingSpeed) {
+            return;
+        }
+
+        double radius = Math.max(0.45, getConfig().getDouble("player-collision-radius", 0.78));
         long now = System.currentTimeMillis();
 
-        for (Entity entity : ball.getNearbyEntities(radius, 1.25, radius)) {
+        for (Entity entity : ball.getNearbyEntities(radius, 1.15, radius)) {
             if (!(entity instanceof Player player) || player.getGameMode() == GameMode.SPECTATOR) {
                 continue;
             }
 
-            long last = lastKickAt.getOrDefault(player.getUniqueId(), 0L);
-            if (now - last < cooldown) {
+            if (lastShooter != null
+                    && player.getUniqueId().equals(lastShooter)
+                    && now < shooterCollisionGraceUntilMs) {
                 continue;
             }
 
-            double horizontalDistanceSquared = horizontalDistanceSquared(player.getLocation(), ball.getLocation());
-            if (horizontalDistanceSquared > radius * radius) {
-                continue;
+            if (horizontalDistanceSquared(player.getLocation(), ball.getLocation()) <= radius * radius) {
+                stopBall();
+                return;
             }
-
-            kickBallFrom(player);
-            lastKickAt.put(player.getUniqueId(), now);
         }
     }
 
-    private void kickBallFrom(Player player) {
-        Vector direction = ball.getLocation().toVector().subtract(player.getLocation().toVector());
+    private boolean canControlBall(Player player) {
+        if (ball == null || !ball.isValid() || player.getWorld() != ball.getWorld()) {
+            return false;
+        }
+
+        double interactionRadius = Math.max(1.0, getConfig().getDouble("interaction-radius", 2.35));
+        double playerDistanceSquared = horizontalDistanceSquared(player.getLocation(), ball.getLocation());
+
+        if (playerDistanceSquared > interactionRadius * interactionRadius) {
+            return false;
+        }
+
+        double tieTolerance = 0.04;
+        for (Player other : fieldWorld.getPlayers()) {
+            if (other.equals(player) || other.getGameMode() == GameMode.SPECTATOR) {
+                continue;
+            }
+
+            double otherDistanceSquared = horizontalDistanceSquared(other.getLocation(), ball.getLocation());
+            if (otherDistanceSquared + tieTolerance < playerDistanceSquared) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void shootOrPassBall(Player player) {
+        long now = System.currentTimeMillis();
+        long cooldown = Math.max(100L, getConfig().getLong("shot-cooldown-ms", 180L));
+        if (now - lastShotAtMs < cooldown) {
+            return;
+        }
+
+        Vector direction = player.getEyeLocation().getDirection();
         direction.setY(0);
 
         if (direction.lengthSquared() < 0.01) {
-            direction = player.getLocation().getDirection().setY(0);
+            direction = ball.getLocation().toVector().subtract(player.getLocation().toVector()).setY(0);
         }
-
         if (direction.lengthSquared() < 0.01) {
             direction = new Vector(0, 0, -1);
         }
-
         direction.normalize();
 
-        Vector playerVelocity = player.getVelocity().clone().setY(0);
-        double movementSpeed = playerVelocity.length();
-
-        double strength = getConfig().getDouble("base-kick-strength", 0.46)
-                + Math.min(0.35, movementSpeed * getConfig().getDouble("movement-kick-scale", 0.80));
-
-        if (player.isSprinting()) {
-            strength += getConfig().getDouble("sprint-kick-bonus", 0.12);
-        }
-
-        strength = Math.min(strength, getConfig().getDouble("maximum-kick-strength", 0.92));
+        boolean strongShot = player.isSprinting();
+        double strength = strongShot
+                ? getConfig().getDouble("sprint-shot-strength", 1.02)
+                : getConfig().getDouble("pass-strength", 0.68);
+        double lift = strongShot
+                ? getConfig().getDouble("shot-lift", 0.10)
+                : getConfig().getDouble("pass-lift", 0.055);
 
         Vector velocity = direction.multiply(strength);
-        velocity.setY(0.16 + Math.min(0.08, movementSpeed * 0.10));
+        velocity.setY(lift);
         ball.setVelocity(velocity);
+        ball.setFallDistance(0);
+
+        lastShooter = player.getUniqueId();
+        lastShotAtMs = now;
+        shooterCollisionGraceUntilMs = now
+                + Math.max(100L, getConfig().getLong("shooter-collision-grace-ms", 300L));
+    }
+
+    private void stopBall() {
+        if (ball == null || !ball.isValid()) {
+            return;
+        }
+
+        ball.setVelocity(new Vector(0, 0, 0));
+        ball.setFallDistance(0);
+        lastShooter = null;
+        shooterCollisionGraceUntilMs = 0L;
     }
 
     private void applyGroundFriction() {
@@ -484,13 +536,16 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         }
 
         Vector velocity = ball.getVelocity();
-        double x = velocity.getX() * 0.89;
-        double z = velocity.getZ() * 0.89;
+        double friction = Math.max(0.80, Math.min(0.999,
+                getConfig().getDouble("ground-friction-multiplier", 0.965)));
+        double x = velocity.getX() * friction;
+        double z = velocity.getZ() * friction;
+        double stopThreshold = Math.max(0.003, getConfig().getDouble("stop-speed-threshold", 0.012));
 
-        if (Math.abs(x) < 0.015) {
+        if (Math.abs(x) < stopThreshold) {
             x = 0;
         }
-        if (Math.abs(z) < 0.015) {
+        if (Math.abs(z) < stopThreshold) {
             z = 0;
         }
 
@@ -605,13 +660,18 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         slime.setAI(false);
         slime.setGravity(true);
         slime.setSilent(true);
-        slime.setInvulnerable(true);
+
+        // Damage is cancelled by the plugin so left-click attacks can be used as
+        // a soccer control without actually hurting the slime.
+        slime.setInvulnerable(false);
 
         // Session-only entity: never save soccer balls into chunk data.
         slime.setPersistent(false);
         slime.setRemoveWhenFarAway(true);
 
-        slime.setCollidable(true);
+        // Native player/entity collision is client-predicted and inconsistent for
+        // legacy Eagler clients. Player contact is simulated in tickSoccer instead.
+        slime.setCollidable(false);
         slime.setCustomName(ChatColor.WHITE + "Soccer Ball");
         slime.setCustomNameVisible(false);
     }
@@ -621,6 +681,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             ball.remove();
         }
         ball = null;
+        lastShooter = null;
+        shooterCollisionGraceUntilMs = 0L;
         resettingBall = false;
     }
 
@@ -653,8 +715,28 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     @EventHandler
     public void onBallDamage(EntityDamageEvent event) {
-        if (isSoccerBall(event.getEntity())) {
-            event.setCancelled(true);
+        if (!isSoccerBall(event.getEntity())) {
+            return;
+        }
+
+        event.setCancelled(true);
+
+        if (event instanceof EntityDamageByEntityEvent byEntity
+                && byEntity.getDamager() instanceof Player player
+                && canControlBall(player)) {
+            shootOrPassBall(player);
+        }
+    }
+
+    @EventHandler
+    public void onBallRightClick(PlayerInteractAtEntityEvent event) {
+        if (!isSoccerBall(event.getRightClicked()) || event.getHand() != EquipmentSlot.HAND) {
+            return;
+        }
+
+        event.setCancelled(true);
+        if (canControlBall(event.getPlayer())) {
+            stopBall();
         }
     }
 

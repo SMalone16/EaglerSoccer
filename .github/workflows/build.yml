@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths-ignore:
       - 'dist/**'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -40,6 +42,7 @@ jobs:
           path: dist/EaglerSoccer-1.0.0.jar
 
       - name: Keep latest JAR in repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

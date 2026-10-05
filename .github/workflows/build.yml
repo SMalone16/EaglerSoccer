@@ -48,6 +48,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dist/EaglerSoccer-1.1.0.jar
           if ! git diff --cached --quiet; then
-            git commit -m "Build EaglerSoccer 1.0.0"
+            git commit -m "Build EaglerSoccer 1.1.0"
             git push
           fi

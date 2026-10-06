@@ -34,6 +34,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/EaglerSoccer-1.3.0.jar dist/EaglerSoccer-1.3.0.jar
+          cp target/EaglerSoccer-1.3.0.jar dist/EaglerSoccer.jar
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -46,7 +47,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add dist/EaglerSoccer-1.3.0.jar
+          git add dist/EaglerSoccer-1.3.0.jar dist/EaglerSoccer.jar
           if ! git diff --cached --quiet; then
             git commit -m "Build EaglerSoccer 1.3.0"
             git push

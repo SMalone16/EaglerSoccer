@@ -11,6 +11,9 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.data.Bisected;
+import org.bukkit.block.data.type.Door;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
@@ -19,10 +22,15 @@ import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Slime;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockExplodeEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.persistence.PersistentDataType;
@@ -38,7 +46,7 @@ import java.util.concurrent.CompletableFuture;
 
 public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, TabExecutor {
 
-    private static final int FIELD_LAYOUT_VERSION = 2;
+    private static final int FIELD_LAYOUT_VERSION = 3;
     private static final int LEGACY_HALF_WIDTH = 12;
     private static final int LEGACY_HALF_LENGTH = 20;
 
@@ -53,6 +61,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     private UUID lastShooter;
     private long lastShotAtMs = 0L;
     private long shooterCollisionGraceUntilMs = 0L;
+    private long allCollisionGraceUntilMs = 0L;
     private boolean resettingBall = false;
     private boolean fieldBuilding = false;
 
@@ -66,6 +75,9 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (getCommand("soccer") != null) {
             getCommand("soccer").setExecutor(this);
             getCommand("soccer").setTabCompleter(this);
+        }
+        if (getCommand("leave") != null) {
+            getCommand("leave").setExecutor(this);
         }
 
         getServer().getScheduler().runTaskLater(this, () -> {
@@ -182,6 +194,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
             int blocksPerTick = Math.max(50, getConfig().getInt("build-blocks-per-tick", 180));
             applyBlockChangesBatched(world, changes, blocksPerTick, () -> {
+                placeExitDoor(world, centerX, surfaceY, centerZ, halfWidth);
                 fieldWorld = world;
                 fieldCenter = new Location(world, centerX + 0.5, surfaceY + 1.05, centerZ + 0.5);
 
@@ -275,6 +288,64 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         int goalHeight = Math.max(2, getConfig().getInt("goal-height", 3));
         queueGoal(changes, centerX, y, centerZ - halfLength - 1, goalWidth, goalHeight, Material.BLUE_WOOL);
         queueGoal(changes, centerX, y, centerZ + halfLength + 1, goalWidth, goalHeight, Material.RED_WOOL);
+
+        queueGlassCage(changes, centerX, y, centerZ, halfWidth, halfLength);
+        queueExitPad(changes, centerX, y, centerZ, halfWidth);
+    }
+
+    private void queueGlassCage(Queue<BlockChange> changes, int centerX, int y, int centerZ,
+                                int halfWidth, int halfLength) {
+        int outerWidth = halfWidth + 1;
+        int outerLength = halfLength + 2;
+        int cageHeight = Math.max(4, getConfig().getInt("cage-height", 6));
+
+        for (int dx = -outerWidth; dx <= outerWidth; dx++) {
+            for (int dz = -outerLength; dz <= outerLength; dz++) {
+                boolean wall = Math.abs(dx) == outerWidth || Math.abs(dz) == outerLength;
+
+                if (wall) {
+                    for (int dy = 1; dy < cageHeight; dy++) {
+                        boolean doorOpening = dx == -outerWidth && dz == 0 && dy <= 2;
+                        changes.add(new BlockChange(
+                                centerX + dx,
+                                y + dy,
+                                centerZ + dz,
+                                doorOpening ? Material.AIR : Material.GLASS
+                        ));
+                    }
+                }
+
+                changes.add(new BlockChange(centerX + dx, y + cageHeight, centerZ + dz, Material.GLASS));
+            }
+        }
+    }
+
+    private void queueExitPad(Queue<BlockChange> changes, int centerX, int y, int centerZ, int halfWidth) {
+        int outerWidth = halfWidth + 1;
+
+        for (int offset = 1; offset <= 3; offset++) {
+            int x = centerX - outerWidth - offset;
+            for (int dz = -1; dz <= 1; dz++) {
+                changes.add(new BlockChange(x, y, centerZ + dz, Material.STONE_BRICKS));
+            }
+        }
+    }
+
+    private void placeExitDoor(World world, int centerX, int y, int centerZ, int halfWidth) {
+        int doorX = centerX - (halfWidth + 1);
+
+        Door bottomData = (Door) Material.IRON_DOOR.createBlockData();
+        bottomData.setFacing(BlockFace.EAST);
+        bottomData.setHalf(Bisected.Half.BOTTOM);
+        bottomData.setOpen(false);
+
+        Door topData = (Door) Material.IRON_DOOR.createBlockData();
+        topData.setFacing(BlockFace.EAST);
+        topData.setHalf(Bisected.Half.TOP);
+        topData.setOpen(false);
+
+        world.getBlockAt(doorX, y + 1, centerZ).setBlockData(bottomData, false);
+        world.getBlockAt(doorX, y + 2, centerZ).setBlockData(topData, false);
     }
 
     private void queueLegacyMarkerCleanup(Queue<BlockChange> changes, World world,
@@ -436,6 +507,9 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
         double radius = Math.max(0.45, getConfig().getDouble("player-collision-radius", 0.78));
         long now = System.currentTimeMillis();
+        if (now < allCollisionGraceUntilMs) {
+            return;
+        }
 
         for (Entity entity : ball.getNearbyEntities(radius, 1.15, radius)) {
             if (!(entity instanceof Player player) || player.getGameMode() == GameMode.SPECTATOR) {
@@ -482,13 +556,33 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         return true;
     }
 
-    private void shootOrPassBall(Player player) {
+    private void queueShot(Player player, Slime clickedBall) {
         long now = System.currentTimeMillis();
         long cooldown = Math.max(100L, getConfig().getLong("shot-cooldown-ms", 180L));
         if (now - lastShotAtMs < cooldown) {
             return;
         }
 
+        // Reserve the click immediately, but apply the velocity one tick later.
+        // Eagler/legacy attack translation can otherwise overwrite velocity that is
+        // assigned from inside the same cancelled damage event.
+        lastShotAtMs = now;
+        UUID expectedBall = clickedBall.getUniqueId();
+
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (!player.isOnline()
+                    || ball == null
+                    || !ball.isValid()
+                    || !ball.getUniqueId().equals(expectedBall)
+                    || !canControlBall(player)) {
+                return;
+            }
+
+            applyShot(player);
+        }, 1L);
+    }
+
+    private void applyShot(Player player) {
         Vector direction = player.getEyeLocation().getDirection();
         direction.setY(0);
 
@@ -513,10 +607,14 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         ball.setVelocity(velocity);
         ball.setFallDistance(0);
 
+        long now = System.currentTimeMillis();
         lastShooter = player.getUniqueId();
-        lastShotAtMs = now;
         shooterCollisionGraceUntilMs = now
                 + Math.max(100L, getConfig().getLong("shooter-collision-grace-ms", 300L));
+        allCollisionGraceUntilMs = now
+                + Math.max(50L, getConfig().getLong("post-kick-collision-grace-ms", 120L));
+
+        player.playSound(player.getLocation(), Sound.ENTITY_SLIME_ATTACK, 0.45f, 1.35f);
     }
 
     private void stopBall() {
@@ -528,6 +626,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         ball.setFallDistance(0);
         lastShooter = null;
         shooterCollisionGraceUntilMs = 0L;
+        allCollisionGraceUntilMs = 0L;
     }
 
     private void applyGroundFriction() {
@@ -657,7 +756,12 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     private void configureBall(Slime slime) {
         slime.setSize(1);
-        slime.setAI(false);
+
+        // Keep normal entity physics enabled while disabling autonomous mob goals.
+        // This is more reliable for plugin-applied velocity than the NoAI flag on
+        // translated legacy clients.
+        slime.setAI(true);
+        slime.setAware(false);
         slime.setGravity(true);
         slime.setSilent(true);
 
@@ -683,6 +787,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         ball = null;
         lastShooter = null;
         shooterCollisionGraceUntilMs = 0L;
+        allCollisionGraceUntilMs = 0L;
         resettingBall = false;
     }
 
@@ -713,9 +818,21 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         }
     }
 
-    @EventHandler
+    private Slime resolveSoccerBall(Entity entity) {
+        if (!(entity instanceof Slime slime) || !isSoccerBall(entity)) {
+            return null;
+        }
+
+        if (ball == null || !ball.isValid() || !ball.getUniqueId().equals(slime.getUniqueId())) {
+            ball = slime;
+        }
+        return slime;
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onBallDamage(EntityDamageEvent event) {
-        if (!isSoccerBall(event.getEntity())) {
+        Slime clickedBall = resolveSoccerBall(event.getEntity());
+        if (clickedBall == null) {
             return;
         }
 
@@ -724,13 +841,18 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (event instanceof EntityDamageByEntityEvent byEntity
                 && byEntity.getDamager() instanceof Player player
                 && canControlBall(player)) {
-            shootOrPassBall(player);
+            queueShot(player, clickedBall);
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onBallRightClick(PlayerInteractAtEntityEvent event) {
-        if (!isSoccerBall(event.getRightClicked()) || event.getHand() != EquipmentSlot.HAND) {
+        if (event.getHand() != EquipmentSlot.HAND) {
+            return;
+        }
+
+        Slime clickedBall = resolveSoccerBall(event.getRightClicked());
+        if (clickedBall == null) {
             return;
         }
 
@@ -752,8 +874,64 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         }
     }
 
+    @EventHandler
+    public void onArenaBlockBreak(BlockBreakEvent event) {
+        if (isProtectedArenaBlock(event.getBlock())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onArenaBlockPlace(BlockPlaceEvent event) {
+        if (isProtectedArenaBlock(event.getBlockPlaced())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onArenaEntityExplode(EntityExplodeEvent event) {
+        event.blockList().removeIf(this::isProtectedArenaBlock);
+    }
+
+    @EventHandler
+    public void onArenaBlockExplode(BlockExplodeEvent event) {
+        event.blockList().removeIf(this::isProtectedArenaBlock);
+    }
+
+    private boolean isProtectedArenaBlock(Block block) {
+        if (fieldWorld == null || fieldCenter == null || block.getWorld() != fieldWorld) {
+            return false;
+        }
+
+        int centerX = getConfig().getInt("field.center-x");
+        int surfaceY = getConfig().getInt("field.center-y");
+        int centerZ = getConfig().getInt("field.center-z");
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+        int outerWidth = halfWidth + 1;
+        int outerLength = halfLength + 2;
+        int cageHeight = Math.max(4, getConfig().getInt("cage-height", 6));
+
+        return block.getX() >= centerX - outerWidth - 3
+                && block.getX() <= centerX + outerWidth
+                && block.getZ() >= centerZ - outerLength
+                && block.getZ() <= centerZ + outerLength
+                && block.getY() >= surfaceY
+                && block.getY() <= surfaceY + cageHeight;
+    }
+
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (command.getName().equalsIgnoreCase("leave")) {
+            if (!(sender instanceof Player player)) {
+                sender.sendMessage("Only a player can use /leave.");
+                return true;
+            }
+
+            teleportPlayerToExit(player);
+            return true;
+        }
+
         if (args.length == 0) {
             if (!(sender instanceof Player player)) {
                 sendUsage(sender, label);
@@ -818,7 +996,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             return;
         }
 
-        Location target = fieldCenter.clone().add(0, 1, 0);
+        Location target = fieldEntryLocation();
         player.sendMessage(ChatColor.YELLOW + "Loading the soccer field...");
 
         player.teleportAsync(target).whenComplete((success, error) -> {
@@ -843,7 +1021,57 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         });
     }
 
+    private Location fieldEntryLocation() {
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int outerWidth = halfWidth + 1;
+        Location target = fieldCenter.clone().add(-(outerWidth - 1), 0, 0);
+        target.setYaw(-90.0f);
+        return target;
+    }
+
+    private Location fieldExitLocation() {
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int outerWidth = halfWidth + 1;
+        Location target = fieldCenter.clone().add(-(outerWidth + 2), 0, 0);
+        target.setYaw(-90.0f);
+        return target;
+    }
+
+    private void teleportPlayerToExit(Player player) {
+        if (fieldCenter == null || fieldBuilding) {
+            World world = Bukkit.getWorld(getConfig().getString("world", "world"));
+            if (world != null) {
+                player.teleportAsync(world.getSpawnLocation());
+            }
+            player.sendMessage(ChatColor.YELLOW + "Soccer field is not ready; returning to world spawn.");
+            return;
+        }
+
+        Location target = fieldExitLocation();
+        player.sendMessage(ChatColor.YELLOW + "Leaving the soccer field...");
+
+        player.teleportAsync(target).whenComplete((success, error) -> {
+            if (!isEnabled()) {
+                return;
+            }
+
+            getServer().getScheduler().runTask(this, () -> {
+                if (error != null || !Boolean.TRUE.equals(success)) {
+                    player.sendMessage(ChatColor.RED + "Could not leave the soccer field.");
+                    if (error != null) {
+                        getLogger().warning("Async soccer exit teleport failed for " + player.getName()
+                                + ": " + error.getMessage());
+                    }
+                    return;
+                }
+
+                player.sendMessage(ChatColor.GREEN + "Returned to the soccer entrance.");
+            });
+        });
+    }
+
     private void sendUsage(CommandSender sender, String label) {
+        sender.sendMessage(ChatColor.YELLOW + "/leave");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " setup");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " tp");
         sender.sendMessage(ChatColor.YELLOW + "/" + label + " reset");

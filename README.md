@@ -14,7 +14,7 @@ There is no automatic dribbling or proximity kick. Walking near the slime does n
 
 ## Ball physics
 
-The visible ball is a size-1 slime for Eaglercraft 1.12.2 compatibility, but the soccer behavior is controlled by the plugin:
+The visible ball is a size-1 slime for Eaglercraft 1.12.2 compatibility, but the soccer behavior is controlled by the plugin. Left-click impulses are deliberately applied one server tick after the translated attack event so cancellation/knockback handling cannot erase the kick:
 
 - the ball keeps moving after a pass or shot;
 - ground friction gradually reduces horizontal speed;
@@ -29,6 +29,9 @@ The shooter receives a very short collision grace period so the ball can leave t
 - Compact **13 x 23** pitch.
 - **Single-layer** field surface.
 - 5-block-wide blue and red goal frames.
+- Full glass enclosure with walls and a roof to keep the ball in play.
+- Closed iron entrance door on the west side with a protected stone-brick exit pad.
+- Arena blocks cannot be broken or replaced by players, and explosions cannot damage the arena.
 - Field construction is batched across ticks.
 - Soccer chunks load asynchronously.
 - `/soccer` uses Paper async teleporting.
@@ -48,7 +51,10 @@ Players:
 
 ```text
 /soccer
+/leave
 ```
+
+`/soccer` enters just inside the cage door. `/leave` returns you to the protected pad directly outside that door.
 
 Operators:
 
@@ -67,5 +73,5 @@ The project targets Java 21 and Paper 1.21.11.
 GitHub Actions builds:
 
 ```text
-dist/EaglerSoccer-1.2.0.jar
+dist/EaglerSoccer-1.3.0.jar
 ```

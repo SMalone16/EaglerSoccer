@@ -1,5 +1,5 @@
 name: EaglerSoccer
-version: '1.2.0'
+version: '1.3.0'
 main: org.pawling.eaglersoccer.EaglerSoccerPlugin
 api-version: '1.21.11'
 author: Pawling CSD Game Development
@@ -9,6 +9,9 @@ commands:
   soccer:
     description: Teleport to the soccer field; operators can also use administration tools
     usage: /soccer
+  leave:
+    description: Leave the soccer field and return to the protected entrance pad
+    usage: /leave
 
 permissions:
   eaglersoccer.admin:

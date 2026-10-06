@@ -32,17 +32,23 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerInteractAtEntityEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scoreboard.Scoreboard;
+import org.bukkit.scoreboard.Team;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadLocalRandom;
 
 public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, TabExecutor {
 
@@ -54,6 +60,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     private World fieldWorld;
     private Location fieldCenter;
     private Slime ball;
+
+    private Team redTeam;
+    private Team blueTeam;
+    private final Map<UUID, String> previousScoreboardTeams = new HashMap<>();
+    private final Map<UUID, String> previousPlayerListNames = new HashMap<>();
 
     private int blueScore = 0;
     private int redScore = 0;
@@ -69,6 +80,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     public void onEnable() {
         saveDefaultConfig();
         ballKey = new NamespacedKey(this, "soccer_ball");
+        initializeSoccerTeams();
 
         getServer().getPluginManager().registerEvents(this, this);
 
@@ -95,7 +107,134 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     @Override
     public void onDisable() {
         lastShooter = null;
+
+        for (Player player : new ArrayList<>(Bukkit.getOnlinePlayers())) {
+            removePlayerFromSoccerTeam(player, true);
+        }
+
+        clearTeamEntries(redTeam);
+        clearTeamEntries(blueTeam);
         despawnActiveBall();
+    }
+
+    private void initializeSoccerTeams() {
+        Scoreboard scoreboard = Bukkit.getScoreboardManager().getMainScoreboard();
+
+        redTeam = scoreboard.getTeam("soccer_red");
+        if (redTeam == null) {
+            redTeam = scoreboard.registerNewTeam("soccer_red");
+        }
+
+        blueTeam = scoreboard.getTeam("soccer_blue");
+        if (blueTeam == null) {
+            blueTeam = scoreboard.registerNewTeam("soccer_blue");
+        }
+
+        configureTeam(redTeam, ChatColor.RED, "[RED] ");
+        configureTeam(blueTeam, ChatColor.BLUE, "[BLUE] ");
+
+        // Main-scoreboard teams can survive a hot reload. Soccer assignments should
+        // not, so begin each plugin lifecycle with a clean roster.
+        clearTeamEntries(redTeam);
+        clearTeamEntries(blueTeam);
+    }
+
+    private void configureTeam(Team team, ChatColor color, String prefix) {
+        team.setColor(color);
+        team.setPrefix(color + prefix);
+        team.setOption(Team.Option.NAME_TAG_VISIBILITY, Team.OptionStatus.ALWAYS);
+    }
+
+    private void clearTeamEntries(Team team) {
+        if (team == null) {
+            return;
+        }
+
+        for (String entry : new ArrayList<>(team.getEntries())) {
+            team.removeEntry(entry);
+        }
+    }
+
+    private Team assignPlayerToSoccerTeam(Player player) {
+        String entry = player.getName();
+
+        if (redTeam.hasEntry(entry)) {
+            refreshTeamDisplay(player, redTeam);
+            return redTeam;
+        }
+        if (blueTeam.hasEntry(entry)) {
+            refreshTeamDisplay(player, blueTeam);
+            return blueTeam;
+        }
+
+        UUID uuid = player.getUniqueId();
+        Scoreboard scoreboard = Bukkit.getScoreboardManager().getMainScoreboard();
+        Team previousTeam = scoreboard.getEntryTeam(entry);
+
+        previousScoreboardTeams.put(uuid, previousTeam == null ? "" : previousTeam.getName());
+        previousPlayerListNames.put(uuid, player.getPlayerListName());
+
+        Team assigned;
+        int redSize = redTeam.getEntries().size();
+        int blueSize = blueTeam.getEntries().size();
+
+        if (redSize < blueSize) {
+            assigned = redTeam;
+        } else if (blueSize < redSize) {
+            assigned = blueTeam;
+        } else {
+            assigned = ThreadLocalRandom.current().nextBoolean() ? redTeam : blueTeam;
+        }
+
+        assigned.addEntry(entry);
+        refreshTeamDisplay(player, assigned);
+
+        ChatColor color = assigned == redTeam ? ChatColor.RED : ChatColor.BLUE;
+        String teamName = assigned == redTeam ? "RED" : "BLUE";
+
+        player.sendTitle(
+                color + teamName + " TEAM",
+                ChatColor.WHITE + "Your name color shows your side.",
+                5,
+                45,
+                10
+        );
+        player.sendMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.WHITE + "You are on "
+                + color + teamName + " TEAM" + ChatColor.WHITE + ".");
+
+        return assigned;
+    }
+
+    private void refreshTeamDisplay(Player player, Team team) {
+        ChatColor color = team == redTeam ? ChatColor.RED : ChatColor.BLUE;
+        String teamName = team == redTeam ? "RED" : "BLUE";
+        player.setPlayerListName(color + "[" + teamName + "] " + player.getName());
+    }
+
+    private void removePlayerFromSoccerTeam(Player player, boolean restorePreviousTeam) {
+        String entry = player.getName();
+
+        if (redTeam != null) {
+            redTeam.removeEntry(entry);
+        }
+        if (blueTeam != null) {
+            blueTeam.removeEntry(entry);
+        }
+
+        UUID uuid = player.getUniqueId();
+        String previousTeamName = previousScoreboardTeams.remove(uuid);
+        String previousListName = previousPlayerListNames.remove(uuid);
+
+        if (restorePreviousTeam && previousTeamName != null && !previousTeamName.isEmpty()) {
+            Team previousTeam = Bukkit.getScoreboardManager().getMainScoreboard().getTeam(previousTeamName);
+            if (previousTeam != null) {
+                previousTeam.addEntry(entry);
+            }
+        }
+
+        if (previousListName != null) {
+            player.setPlayerListName(previousListName);
+        }
     }
 
     private boolean loadSavedField() {
@@ -598,6 +737,12 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         double strength = strongShot
                 ? getConfig().getDouble("sprint-shot-strength", 1.02)
                 : getConfig().getDouble("pass-strength", 0.68);
+
+        // Multiplier defaults to 2.0 even for existing config files created by
+        // earlier plugin versions, so upgrading immediately gets the stronger kick.
+        double forceMultiplier = Math.max(0.1, getConfig().getDouble("kick-force-multiplier", 2.0));
+        strength *= forceMultiplier;
+
         double lift = strongShot
                 ? getConfig().getDouble("shot-lift", 0.10)
                 : getConfig().getDouble("pass-lift", 0.055);
@@ -863,6 +1008,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     }
 
     @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        removePlayerFromSoccerTeam(event.getPlayer(), true);
+    }
+
+    @EventHandler
     public void onBallDeath(EntityDeathEvent event) {
         if (isSoccerBall(event.getEntity())) {
             event.getDrops().clear();
@@ -1016,6 +1166,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
                 // Any persistent balls left by pre-1.1 builds are now in loaded chunks and can be removed safely.
                 removeTaggedBallsNearField();
+                assignPlayerToSoccerTeam(player);
                 player.sendMessage(ChatColor.GREEN + "Teleported to the soccer field.");
             });
         });
@@ -1039,6 +1190,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     private void teleportPlayerToExit(Player player) {
         if (fieldCenter == null || fieldBuilding) {
+            removePlayerFromSoccerTeam(player, true);
             World world = Bukkit.getWorld(getConfig().getString("world", "world"));
             if (world != null) {
                 player.teleportAsync(world.getSpawnLocation());
@@ -1065,6 +1217,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
                     return;
                 }
 
+                removePlayerFromSoccerTeam(player, true);
                 player.sendMessage(ChatColor.GREEN + "Returned to the soccer entrance.");
             });
         });

@@ -26,6 +26,10 @@ build-blocks-per-tick: 180
 # Left-click = pass. Sprint + left-click = stronger shot.
 # Only the closest player to the ball may control it.
 interaction-radius: 2.35
+
+# Horizontal kick force multiplier. 2.0 doubles both normal passes and sprint shots
+# without doubling vertical lift, so the ball moves faster instead of becoming floaty.
+kick-force-multiplier: 2.0
 pass-strength: 0.68
 sprint-shot-strength: 1.02
 pass-lift: 0.055

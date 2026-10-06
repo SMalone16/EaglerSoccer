@@ -5,7 +5,7 @@
 
   <groupId>org.pawling</groupId>
   <artifactId>EaglerSoccer</artifactId>
-  <version>1.3.0</version>
+  <version>1.4.0</version>
   <packaging>jar</packaging>
 
   <properties>
@@ -30,7 +30,7 @@
   </dependencies>
 
   <build>
-    <finalName>EaglerSoccer-1.3.0</finalName>
+    <finalName>EaglerSoccer-1.4.0</finalName>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

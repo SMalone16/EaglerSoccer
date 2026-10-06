@@ -6,6 +6,7 @@ A Paper 1.21.11 soccer plugin designed for the Pawling classroom Eaglercraft ser
 
 - **Left-click the ball:** pass it in the direction you are looking.
 - **Sprint + left-click:** stronger shot.
+- Kick strength is now **2x** the previous version horizontally; vertical lift is unchanged.
 - **Right-click the ball:** trap/control it and stop its movement.
 - **Run into a moving ball:** simulated player collision stops the ball.
 - Only the **closest player to the ball** can pass, shoot, or trap it.
@@ -23,6 +24,14 @@ The visible ball is a size-1 slime for Eaglercraft 1.12.2 compatibility, but the
 - lightweight server-side collision detection stops the moving ball when it reaches a player.
 
 The shooter receives a very short collision grace period so the ball can leave their feet instead of immediately stopping against the player who kicked it.
+
+## Teams
+
+- Entering with `/soccer` assigns the player to **Red** or **Blue**.
+- The plugin keeps the teams as even as possible and randomly chooses when the counts are tied.
+- Player nameplates use a red or blue scoreboard-team prefix, and the tab list shows `[RED]` or `[BLUE]`.
+- A large team title is shown on entry for immediate feedback.
+- `/leave` or disconnecting removes the Soccer assignment; any prior scoreboard team/list name is restored when possible.
 
 ## Field
 
@@ -73,5 +82,5 @@ The project targets Java 21 and Paper 1.21.11.
 GitHub Actions builds:
 
 ```text
-dist/EaglerSoccer-1.3.0.jar
+dist/EaglerSoccer-1.4.0.jar
 ```

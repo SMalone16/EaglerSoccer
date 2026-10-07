@@ -1,5 +1,5 @@
 name: EaglerSoccer
-version: '1.5.0'
+version: '1.6.0'
 main: org.pawling.eaglersoccer.EaglerSoccerPlugin
 api-version: '1.21.11'
 author: Pawling CSD Game Development
@@ -7,7 +7,7 @@ description: Legacy-client-compatible soccer field and ball physics for the clas
 
 commands:
   soccer:
-    description: Start or join a soccer lobby; operators can also use administration tools
+    description: Start or join soccer, including an open live match; operators can also use administration tools
     usage: /soccer
   leave:
     description: Leave the soccer field and return to the protected entrance pad

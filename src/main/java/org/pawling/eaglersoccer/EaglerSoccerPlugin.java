@@ -19,6 +19,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Slime;
 import org.bukkit.event.EventHandler;
@@ -31,6 +32,7 @@ import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerInteractAtEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
@@ -39,6 +41,8 @@ import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.scoreboard.DisplaySlot;
+import org.bukkit.scoreboard.Objective;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 import org.bukkit.util.Vector;
@@ -67,8 +71,15 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
     private Team redTeam;
     private Team blueTeam;
+    private Scoreboard soccerOverlayScoreboard;
+    private Objective soccerOverlayObjective;
+    private Team overlayRedTeam;
+    private Team overlayBlueTeam;
     private final Map<UUID, String> previousScoreboardTeams = new HashMap<>();
     private final Map<UUID, String> previousPlayerListNames = new HashMap<>();
+    private final Map<UUID, Scoreboard> previousPlayerScoreboards = new HashMap<>();
+    private final List<String> overlayLines = new ArrayList<>();
+    private final Map<UUID, SoccerRole> playerRoles = new HashMap<>();
 
     private int blueScore = 0;
     private int redScore = 0;
@@ -79,6 +90,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     private long allCollisionGraceUntilMs = 0L;
     private boolean resettingBall = false;
     private boolean fieldBuilding = false;
+    private boolean spawningBall = false;
+    private Vector previousBallVelocity = new Vector();
 
     private MatchState matchState = MatchState.IDLE;
     private final List<UUID> lobbyPlayers = new ArrayList<>();
@@ -108,6 +121,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         getServer().getScheduler().runTaskLater(this, () -> {
             if (!loadSavedField()) {
                 setupField(false, null);
+            } else {
+                clearArenaMobs();
             }
 
             long period = Math.max(1L, getConfig().getLong("soccer-task-period-ticks", 1L));
@@ -156,6 +171,22 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         // not, so begin each plugin lifecycle with a clean roster.
         clearTeamEntries(redTeam);
         clearTeamEntries(blueTeam);
+        initializeSoccerOverlay();
+    }
+
+    private void initializeSoccerOverlay() {
+        soccerOverlayScoreboard = Bukkit.getScoreboardManager().getNewScoreboard();
+        soccerOverlayObjective = soccerOverlayScoreboard.registerNewObjective(
+                "soccer_ui",
+                "dummy",
+                ChatColor.GOLD + "" + ChatColor.BOLD + "SOCCER"
+        );
+        soccerOverlayObjective.setDisplaySlot(DisplaySlot.SIDEBAR);
+
+        overlayRedTeam = soccerOverlayScoreboard.registerNewTeam("soccer_red_ui");
+        overlayBlueTeam = soccerOverlayScoreboard.registerNewTeam("soccer_blue_ui");
+        configureTeam(overlayRedTeam, ChatColor.RED, "[RED] ");
+        configureTeam(overlayBlueTeam, ChatColor.BLUE, "[BLUE] ");
     }
 
     private void configureTeam(Team team, ChatColor color, String prefix) {
@@ -254,6 +285,97 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (previousListName != null) {
             player.setPlayerListName(previousListName);
         }
+
+        detachSoccerOverlay(player);
+        playerRoles.remove(uuid);
+        syncOverlayTeams();
+    }
+
+    private void attachSoccerOverlay(Player player) {
+        if (soccerOverlayScoreboard == null || soccerOverlayObjective == null) {
+            return;
+        }
+
+        UUID uuid = player.getUniqueId();
+        if (!previousPlayerScoreboards.containsKey(uuid) && player.getScoreboard() != soccerOverlayScoreboard) {
+            previousPlayerScoreboards.put(uuid, player.getScoreboard());
+        }
+
+        syncOverlayTeams();
+        player.setScoreboard(soccerOverlayScoreboard);
+        updateSoccerOverlay();
+    }
+
+    private void detachSoccerOverlay(Player player) {
+        Scoreboard previous = previousPlayerScoreboards.remove(player.getUniqueId());
+        if (previous != null) {
+            player.setScoreboard(previous);
+        } else if (player.getScoreboard() == soccerOverlayScoreboard) {
+            player.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
+        }
+    }
+
+    private void syncOverlayTeams() {
+        if (overlayRedTeam == null || overlayBlueTeam == null) {
+            return;
+        }
+
+        clearTeamEntries(overlayRedTeam);
+        clearTeamEntries(overlayBlueTeam);
+
+        if (redTeam != null) {
+            for (String entry : redTeam.getEntries()) {
+                overlayRedTeam.addEntry(entry);
+            }
+        }
+        if (blueTeam != null) {
+            for (String entry : blueTeam.getEntries()) {
+                overlayBlueTeam.addEntry(entry);
+            }
+        }
+    }
+
+    private void updateSoccerOverlay() {
+        if (soccerOverlayScoreboard == null || soccerOverlayObjective == null) {
+            return;
+        }
+
+        syncOverlayTeams();
+
+        for (String line : new ArrayList<>(overlayLines)) {
+            soccerOverlayScoreboard.resetScores(line);
+        }
+        overlayLines.clear();
+
+        List<String> lines = new ArrayList<>();
+        if (matchState == MatchState.RUNNING) {
+            lines.add(ChatColor.BLUE + "Blue: " + ChatColor.WHITE + blueScore);
+            lines.add(ChatColor.RED + "Red: " + ChatColor.WHITE + redScore);
+            lines.add(ChatColor.YELLOW + "Time: " + ChatColor.WHITE + formatClock(matchSecondsRemaining));
+            lines.add(ChatColor.AQUA + "Players: " + ChatColor.WHITE
+                    + activePlayers.size() + "/" + maxMatchPlayers());
+            if (activePlayers.size() < maxMatchPlayers()) {
+                lines.add(ChatColor.GREEN + "Type play to join");
+            }
+        } else if (matchState == MatchState.LOBBY) {
+            lines.add(ChatColor.YELLOW + "Lobby: " + ChatColor.WHITE
+                    + lobbyPlayers.size() + "/" + maxMatchPlayers());
+            lines.add(ChatColor.AQUA + "Starts in: " + ChatColor.WHITE + lobbySecondsRemaining + "s");
+            lines.add(ChatColor.GREEN + "Type play to join");
+        } else {
+            lines.add(ChatColor.GRAY + "Waiting for next game");
+        }
+
+        int score = lines.size();
+        for (String line : lines) {
+            overlayLines.add(line);
+            soccerOverlayObjective.getScore(line).setScore(score--);
+        }
+    }
+
+    private String formatClock(int totalSeconds) {
+        int safeSeconds = Math.max(0, totalSeconds);
+        return String.format("%d:%02d", safeSeconds / 60, safeSeconds % 60);
     }
 
     private boolean loadSavedField() {
@@ -364,6 +486,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
                 saveConfig();
 
                 removeTaggedBallsNearField();
+                clearArenaMobs();
                 fieldBuilding = false;
 
                 getLogger().info("Soccer field ready at " + centerX + ", " + surfaceY + ", " + centerZ
@@ -638,8 +761,67 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         }
 
         processPlayerCollisionStops();
+        applyGlassBounce();
         applyGroundFriction();
         checkGoalOrOutOfBounds();
+
+        if (ball != null && ball.isValid()) {
+            previousBallVelocity = ball.getVelocity().clone();
+        }
+    }
+
+    private void applyGlassBounce() {
+        if (ball == null || !ball.isValid()) {
+            return;
+        }
+
+        Location location = ball.getLocation();
+        Vector velocity = ball.getVelocity().clone();
+
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+
+        // These limits sit just inside the glass block faces and account for the
+        // size-1 slime's radius. If the server's native collision already zeroed
+        // a component, use the previous tick's velocity to produce the rebound.
+        double xLimit = halfWidth + 0.32;
+        double zLimit = halfLength + 1.32;
+        double retention = Math.max(0.35, Math.min(0.98,
+                getConfig().getDouble("glass-bounce-retention", 0.82)));
+
+        double dx = location.getX() - fieldCenter.getX();
+        double dz = location.getZ() - fieldCenter.getZ();
+        boolean bounced = false;
+        Location corrected = location.clone();
+
+        if (Math.abs(dx) >= xLimit) {
+            double sourceX = Math.abs(velocity.getX()) > 0.01
+                    ? velocity.getX()
+                    : previousBallVelocity.getX();
+            if (Math.abs(sourceX) > 0.01 && Math.signum(sourceX) == Math.signum(dx)) {
+                velocity.setX(-sourceX * retention);
+                corrected.setX(fieldCenter.getX() + Math.copySign(xLimit - 0.04, dx));
+                bounced = true;
+            }
+        }
+
+        if (Math.abs(dz) >= zLimit) {
+            double sourceZ = Math.abs(velocity.getZ()) > 0.01
+                    ? velocity.getZ()
+                    : previousBallVelocity.getZ();
+            if (Math.abs(sourceZ) > 0.01 && Math.signum(sourceZ) == Math.signum(dz)) {
+                velocity.setZ(-sourceZ * retention);
+                corrected.setZ(fieldCenter.getZ() + Math.copySign(zLimit - 0.04, dz));
+                bounced = true;
+            }
+        }
+
+        if (bounced) {
+            ball.teleport(corrected);
+            ball.setVelocity(velocity);
+            ball.setFallDistance(0);
+            previousBallVelocity = velocity.clone();
+        }
     }
 
     private boolean hasPlayersNearField() {
@@ -698,7 +880,9 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
     }
 
     private boolean canControlBall(Player player) {
-        if (matchState != MatchState.RUNNING || !activePlayers.contains(player.getUniqueId())) {
+        if (resettingBall
+                || matchState != MatchState.RUNNING
+                || !activePlayers.contains(player.getUniqueId())) {
             return false;
         }
         if (ball == null || !ball.isValid() || player.getWorld() != ball.getWorld()) {
@@ -785,6 +969,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         velocity.setY(lift);
         ball.setVelocity(velocity);
         ball.setFallDistance(0);
+        previousBallVelocity = velocity.clone();
 
         long now = System.currentTimeMillis();
         lastShooter = player.getUniqueId();
@@ -803,6 +988,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
         ball.setVelocity(new Vector(0, 0, 0));
         ball.setFallDistance(0);
+        previousBallVelocity = new Vector();
         lastShooter = null;
         shooterCollisionGraceUntilMs = 0L;
         allCollisionGraceUntilMs = 0L;
@@ -845,10 +1031,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (!resettingBall && insideGoalWidth && dz <= -(halfLength + 0.65)) {
             blueScore++;
             announceGoal(ChatColor.BLUE + "BLUE", blueScore, redScore);
+            updateSoccerOverlay();
             if (scoreLimitReached()) {
                 finishMatch("Score limit reached.");
             } else {
-                resetBallAfterGoal();
+                resetBallAfterGoal(redTeam);
             }
             return;
         }
@@ -856,10 +1043,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (!resettingBall && insideGoalWidth && dz >= halfLength + 0.65) {
             redScore++;
             announceGoal(ChatColor.RED + "RED", blueScore, redScore);
+            updateSoccerOverlay();
             if (scoreLimitReached()) {
                 finishMatch("Score limit reached.");
             } else {
-                resetBallAfterGoal();
+                resetBallAfterGoal(blueTeam);
             }
             return;
         }
@@ -889,16 +1077,34 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         }
     }
 
-    private void resetBallAfterGoal() {
-        if (ball == null || !ball.isValid()) {
+    private void resetBallAfterGoal(Team concedingTeam) {
+        prepareKickoff(concedingTeam, 30L);
+    }
+
+    private void prepareKickoff(Team possessionTeam, long freezeTicks) {
+        if (matchState != MatchState.RUNNING || fieldCenter == null) {
             return;
         }
 
         resettingBall = true;
-        ball.setVelocity(new Vector(0, 0, 0));
-        ball.teleport(ballSpawnLocation());
+        positionPlayersForKickoff(possessionTeam);
 
-        getServer().getScheduler().runTaskLater(this, () -> resettingBall = false, 30L);
+        if (ball == null || !ball.isValid()) {
+            spawnBall();
+        } else {
+            ball.setVelocity(new Vector(0, 0, 0));
+            ball.teleport(ballSpawnLocation());
+            ball.setFallDistance(0);
+        }
+
+        previousBallVelocity = new Vector();
+        updateSoccerOverlay();
+
+        getServer().getScheduler().runTaskLater(this, () -> {
+            if (matchState == MatchState.RUNNING) {
+                resettingBall = false;
+            }
+        }, Math.max(1L, freezeTicks));
     }
 
     private void resetBallImmediately() {
@@ -916,6 +1122,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         ball.setVelocity(new Vector(0, 0, 0));
         ball.teleport(ballSpawnLocation());
         ball.setFallDistance(0);
+        previousBallVelocity = new Vector();
     }
 
     private void spawnBall() {
@@ -929,7 +1136,14 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             return;
         }
 
-        Entity entity = fieldWorld.spawnEntity(ballSpawnLocation(), EntityType.SLIME);
+        Entity entity;
+        spawningBall = true;
+        try {
+            entity = fieldWorld.spawnEntity(ballSpawnLocation(), EntityType.SLIME);
+        } finally {
+            spawningBall = false;
+        }
+
         if (!(entity instanceof Slime slime)) {
             entity.remove();
             getLogger().severe("Could not spawn the soccer ball as a slime.");
@@ -939,6 +1153,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         slime.getPersistentDataContainer().set(ballKey, PersistentDataType.BYTE, (byte) 1);
         configureBall(slime);
         ball = slime;
+        previousBallVelocity = new Vector();
     }
 
     private void configureBall(Slime slime) {
@@ -976,6 +1191,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         shooterCollisionGraceUntilMs = 0L;
         allCollisionGraceUntilMs = 0L;
         resettingBall = false;
+        previousBallVelocity = new Vector();
     }
 
     private Location ballSpawnLocation() {
@@ -1088,6 +1304,62 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
             if (event.getEntity().equals(ball)) {
                 ball = null;
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onArenaCreatureSpawn(CreatureSpawnEvent event) {
+        if (spawningBall) {
+            return;
+        }
+
+        if (isInsideArena(event.getLocation())) {
+            event.setCancelled(true);
+        }
+    }
+
+    private boolean isInsideArena(Location location) {
+        if (fieldWorld == null || fieldCenter == null || location.getWorld() != fieldWorld) {
+            return false;
+        }
+
+        int centerX = getConfig().getInt("field.center-x");
+        int surfaceY = getConfig().getInt("field.center-y");
+        int centerZ = getConfig().getInt("field.center-z");
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+        int outerWidth = halfWidth + 1;
+        int outerLength = halfLength + 2;
+        int cageHeight = Math.max(4, getConfig().getInt("cage-height", 6));
+
+        return location.getX() >= centerX - outerWidth
+                && location.getX() <= centerX + outerWidth + 1
+                && location.getZ() >= centerZ - outerLength
+                && location.getZ() <= centerZ + outerLength + 1
+                && location.getY() >= surfaceY
+                && location.getY() <= surfaceY + cageHeight + 1;
+    }
+
+    private void clearArenaMobs() {
+        if (fieldWorld == null || fieldCenter == null) {
+            return;
+        }
+
+        int halfWidth = makeOddAtLeast(getConfig().getInt("field-width", 13), 9) / 2;
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+        int cageHeight = Math.max(4, getConfig().getInt("cage-height", 6));
+
+        for (Entity entity : fieldWorld.getNearbyEntities(
+                fieldCenter,
+                halfWidth + 2,
+                cageHeight + 2,
+                halfLength + 3
+        )) {
+            if (entity instanceof LivingEntity
+                    && !(entity instanceof Player)
+                    && !isSoccerBall(entity)) {
+                entity.remove();
             }
         }
     }
@@ -1218,7 +1490,13 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         switch (matchState) {
             case IDLE -> beginLobby(player);
             case LOBBY -> joinLobby(player);
-            case RUNNING -> queueForNextGame(player);
+            case RUNNING -> {
+                if (activePlayers.size() < maxMatchPlayers()) {
+                    joinRunningMatch(player);
+                } else {
+                    queueForNextGame(player);
+                }
+            }
         }
     }
 
@@ -1230,7 +1508,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         if (matchState == MatchState.LOBBY) {
             joinLobby(player);
         } else if (matchState == MatchState.RUNNING) {
-            queueForNextGame(player);
+            if (activePlayers.size() < maxMatchPlayers()) {
+                joinRunningMatch(player);
+            } else {
+                queueForNextGame(player);
+            }
         }
     }
 
@@ -1257,6 +1539,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         nextGameQueue.remove(initiator.getUniqueId());
         removePlayerFromSoccerTeam(initiator, true);
         teleportPlayerToField(initiator);
+        attachSoccerOverlay(initiator);
+        updateSoccerOverlay();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.YELLOW
                 + initiator.getName() + " started a game! Type "
@@ -1289,6 +1573,8 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         lobbyPlayers.add(uuid);
         removePlayerFromSoccerTeam(player, true);
         teleportPlayerToField(player);
+        attachSoccerOverlay(player);
+        updateSoccerOverlay();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.GREEN
                 + player.getName() + " joined! " + ChatColor.WHITE
@@ -1312,6 +1598,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             }
 
             lobbySecondsRemaining--;
+            updateSoccerOverlay();
 
             if (lobbySecondsRemaining <= 0) {
                 startMatch();
@@ -1351,11 +1638,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         clearTeamEntries(redTeam);
         clearTeamEntries(blueTeam);
         activePlayers.clear();
+        playerRoles.clear();
 
         for (Player player : players) {
             activePlayers.add(player.getUniqueId());
             assignPlayerToSoccerTeam(player);
-            teleportPlayerToField(player);
         }
 
         lobbyPlayers.clear();
@@ -1364,12 +1651,29 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         matchSecondsRemaining = Math.max(30, getConfig().getInt("match-duration-seconds", 300));
         matchState = MatchState.RUNNING;
         closeArenaDoor();
-        resetBallImmediately();
+        clearArenaMobs();
+
+        assignAllRoles();
+        Team firstKickoff = ThreadLocalRandom.current().nextBoolean() ? redTeam : blueTeam;
+
+        for (Player player : players) {
+            attachSoccerOverlay(player);
+            sendRoleAssignment(player);
+        }
+
+        prepareKickoff(firstKickoff, 20L);
+        updateSoccerOverlay();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.GREEN
                 + "Kickoff! " + ChatColor.RED + redTeam.getEntries().size() + " Red"
                 + ChatColor.WHITE + " vs " + ChatColor.BLUE + blueTeam.getEntries().size() + " Blue"
                 + ChatColor.WHITE + ". Game time: " + matchSecondsRemaining + "s.");
+
+        if (activePlayers.size() < maxMatchPlayers()) {
+            Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.AQUA
+                    + "The match is still open — type " + ChatColor.WHITE + "play"
+                    + ChatColor.AQUA + " to join until " + maxMatchPlayers() + "/" + maxMatchPlayers() + ".");
+        }
 
         startMatchTimer();
     }
@@ -1384,6 +1688,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             }
 
             matchSecondsRemaining--;
+            updateSoccerOverlay();
 
             if (matchSecondsRemaining <= 0) {
                 finishMatch("Time expired.");
@@ -1413,6 +1718,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         cancelMatchTask();
         matchState = MatchState.IDLE;
         despawnActiveBall();
+        playerRoles.clear();
 
         List<UUID> finishedPlayers = new ArrayList<>(activePlayers);
         activePlayers.clear();
@@ -1456,6 +1762,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             lobbyPlayers.add(uuid);
             removePlayerFromSoccerTeam(player, true);
             teleportPlayerToField(player);
+            attachSoccerOverlay(player);
         }
 
         if (lobbyPlayers.isEmpty()) {
@@ -1465,6 +1772,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         matchState = MatchState.LOBBY;
         lobbySecondsRemaining = lobbyCountdownSeconds();
         closeArenaDoor();
+        updateSoccerOverlay();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.AQUA
                 + "Next game lobby is open! " + ChatColor.WHITE
@@ -1504,10 +1812,46 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         removePlayerFromSoccerTeam(player, true);
         teleportPlayerToSpectator(player, ChatColor.AQUA
                 + "You joined the next-game queue. Watch from outside the glass!");
+        attachSoccerOverlay(player);
+        updateSoccerOverlay();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.AQUA
                 + player.getName() + " joined the next-game queue. "
                 + ChatColor.WHITE + nextGameQueue.size() + " waiting.");
+    }
+
+    private void joinRunningMatch(Player player) {
+        UUID uuid = player.getUniqueId();
+
+        if (activePlayers.contains(uuid)) {
+            player.sendMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.YELLOW
+                    + "You are already playing.");
+            return;
+        }
+        if (activePlayers.size() >= maxMatchPlayers()) {
+            queueForNextGame(player);
+            return;
+        }
+
+        nextGameQueue.remove(uuid);
+        lobbyPlayers.remove(uuid);
+        activePlayers.add(uuid);
+
+        Team assigned = assignPlayerToSoccerTeam(player);
+        assignAllRoles();
+        attachSoccerOverlay(player);
+        teleportPlayerToAssignedPosition(player, assigned);
+        sendRoleAssignment(player);
+        updateSoccerOverlay();
+
+        String teamName = assigned == redTeam ? "RED" : "BLUE";
+        ChatColor teamColor = assigned == redTeam ? ChatColor.RED : ChatColor.BLUE;
+
+        Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.GREEN
+                + player.getName() + " joined the live match on "
+                + teamColor + teamName + ChatColor.GREEN + ". "
+                + ChatColor.WHITE + activePlayers.size() + "/" + maxMatchPlayers()
+                + ChatColor.YELLOW + " players, " + formatClock(matchSecondsRemaining) + " remaining.");
     }
 
     private void leaveSoccer(Player player) {
@@ -1520,6 +1864,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         boolean leftLobby = lobbyPlayers.remove(uuid);
         boolean leftMatch = activePlayers.remove(uuid);
         boolean leftQueue = nextGameQueue.remove(uuid);
+        playerRoles.remove(uuid);
 
         removePlayerFromSoccerTeam(player, true);
 
@@ -1545,6 +1890,11 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
             player.sendMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.YELLOW
                     + "You left the next-game queue.");
         }
+
+        if (matchState == MatchState.RUNNING) {
+            assignAllRoles();
+        }
+        updateSoccerOverlay();
     }
 
     private void cancelLobby(String reason) {
@@ -1553,6 +1903,7 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
 
         List<UUID> cancelledPlayers = new ArrayList<>(lobbyPlayers);
         lobbyPlayers.clear();
+        playerRoles.clear();
 
         Bukkit.broadcastMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.YELLOW + reason);
 
@@ -1563,6 +1914,159 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
                 teleportPlayerToSpectator(player, ChatColor.YELLOW + "Lobby closed. You are outside the stadium.");
             }
         }
+    }
+
+    private void assignAllRoles() {
+        playerRoles.clear();
+        assignRolesForTeam(redTeam);
+        assignRolesForTeam(blueTeam);
+    }
+
+    private void assignRolesForTeam(Team team) {
+        if (team == null) {
+            return;
+        }
+
+        List<Player> roster = new ArrayList<>();
+        for (UUID uuid : activePlayers) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null && player.isOnline() && team.hasEntry(player.getName())) {
+                roster.add(player);
+            }
+        }
+
+        if (roster.isEmpty()) {
+            return;
+        }
+
+        if (roster.size() == 1) {
+            playerRoles.put(roster.get(0).getUniqueId(), SoccerRole.CENTER_STRIKER);
+            return;
+        }
+
+        playerRoles.put(roster.get(0).getUniqueId(), SoccerRole.KEEPER);
+
+        if (roster.size() == 2) {
+            playerRoles.put(roster.get(1).getUniqueId(), SoccerRole.CENTER_STRIKER);
+            return;
+        }
+
+        playerRoles.put(roster.get(1).getUniqueId(), SoccerRole.LEFT_STRIKER);
+        playerRoles.put(roster.get(2).getUniqueId(), SoccerRole.RIGHT_STRIKER);
+    }
+
+    private Team soccerTeamFor(Player player) {
+        if (redTeam != null && redTeam.hasEntry(player.getName())) {
+            return redTeam;
+        }
+        if (blueTeam != null && blueTeam.hasEntry(player.getName())) {
+            return blueTeam;
+        }
+        return null;
+    }
+
+    private UUID kickoffTakerFor(Team team) {
+        SoccerRole[] preference = {
+                SoccerRole.CENTER_STRIKER,
+                SoccerRole.LEFT_STRIKER,
+                SoccerRole.RIGHT_STRIKER,
+                SoccerRole.KEEPER
+        };
+
+        for (SoccerRole role : preference) {
+            for (UUID uuid : activePlayers) {
+                Player player = Bukkit.getPlayer(uuid);
+                if (player != null
+                        && player.isOnline()
+                        && soccerTeamFor(player) == team
+                        && playerRoles.get(uuid) == role) {
+                    return uuid;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private void positionPlayersForKickoff(Team possessionTeam) {
+        assignAllRoles();
+        UUID kickoffTaker = kickoffTakerFor(possessionTeam);
+
+        for (UUID uuid : new ArrayList<>(activePlayers)) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null || !player.isOnline()) {
+                continue;
+            }
+
+            Team team = soccerTeamFor(player);
+            if (team == null) {
+                continue;
+            }
+
+            Location target = assignedPosition(player, team, uuid.equals(kickoffTaker));
+            player.teleport(target);
+            player.setVelocity(new Vector());
+            player.setFallDistance(0);
+        }
+    }
+
+    private void teleportPlayerToAssignedPosition(Player player, Team team) {
+        Location target = assignedPosition(player, team, false);
+        player.teleportAsync(target).whenComplete((success, error) -> {
+            if (!isEnabled() || !player.isOnline()) {
+                return;
+            }
+
+            getServer().getScheduler().runTask(this, () -> {
+                if (error != null || !Boolean.TRUE.equals(success)) {
+                    player.sendMessage(ChatColor.RED + "Could not enter your soccer position.");
+                    return;
+                }
+                player.setVelocity(new Vector());
+                player.setFallDistance(0);
+            });
+        });
+    }
+
+    private Location assignedPosition(Player player, Team team, boolean kickoffTaker) {
+        int halfLength = makeOddAtLeast(getConfig().getInt("field-length", 23), 15) / 2;
+        double ownSide = team == redTeam ? -1.0 : 1.0;
+        double x = 0.0;
+        double z;
+
+        if (kickoffTaker) {
+            z = ownSide * 1.35;
+        } else {
+            SoccerRole role = playerRoles.getOrDefault(player.getUniqueId(), SoccerRole.CENTER_STRIKER);
+            switch (role) {
+                case KEEPER -> z = ownSide * Math.max(4.0, halfLength - 1.5);
+                case LEFT_STRIKER -> {
+                    x = -2.0;
+                    z = ownSide * 3.0;
+                }
+                case RIGHT_STRIKER -> {
+                    x = 2.0;
+                    z = ownSide * 3.0;
+                }
+                case CENTER_STRIKER -> z = ownSide * 3.0;
+                default -> z = ownSide * 3.0;
+            }
+        }
+
+        Location target = fieldCenter.clone().add(x, 0, z);
+        target.setYaw(team == redTeam ? 0.0f : 180.0f);
+        target.setPitch(0.0f);
+        return target;
+    }
+
+    private void sendRoleAssignment(Player player) {
+        SoccerRole role = playerRoles.get(player.getUniqueId());
+        if (role == null) {
+            return;
+        }
+
+        player.sendMessage(ChatColor.GOLD + "[Soccer] " + ChatColor.WHITE + "Position: "
+                + ChatColor.AQUA + role.displayName + ChatColor.WHITE + ".");
     }
 
     private void cancelLobbyTask() {
@@ -1766,6 +2270,19 @@ public final class EaglerSoccerPlugin extends JavaPlugin implements Listener, Ta
         IDLE,
         LOBBY,
         RUNNING
+    }
+
+    private enum SoccerRole {
+        KEEPER("Keeper"),
+        LEFT_STRIKER("Left Striker"),
+        RIGHT_STRIKER("Right Striker"),
+        CENTER_STRIKER("Striker");
+
+        private final String displayName;
+
+        SoccerRole(String displayName) {
+            this.displayName = displayName;
+        }
     }
 
     private record BlockChange(int x, int y, int z, Material material) {

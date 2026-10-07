@@ -32,11 +32,14 @@ The shooter receives a very short collision grace period so the ball can leave t
 - Chat reports the current player count out of **6** whenever someone joins and during the final countdown.
 - The game starts when the timer expires or immediately at **6/6**.
 - Teams are assigned only at kickoff and are kept as even as possible: 3v3, 3v2, 2v2, 2v1, or 1v1.
-- Late players who type **play** during a game enter the next-game queue and are moved to the protected spectator pad outside the glass.
+- If a match starts below 6/6, the **play window stays open for the entire live match** until all six spots are filled. Live joiners are assigned to the smaller team and enter at a defined team position.
+- Once a live match reaches 6/6, additional players who type **play** enter the next-game queue and are moved to the protected spectator pad outside the glass.
 - The stadium iron door is forced closed and cannot be opened while a lobby or game is active.
 - Games default to **5 minutes or first to 5 goals**, whichever comes first. Both values are configurable.
 - When a game ends, queued players automatically open the next 10-second lobby.
 - Player nameplates use a red or blue scoreboard-team prefix, and the tab list shows `[RED]` or `[BLUE]`.
+- Players and queued spectators get an on-screen sidebar showing **Blue score, Red score, time remaining, and player count**.
+- At initial kickoff and after every goal, players return to preset **Keeper / Left Striker / Right Striker** positions (with a center striker layout for smaller teams). The team that conceded gets the restart, with its kickoff taker placed directly behind the ball.
 - `/leave` or disconnecting removes the player from the lobby, active match, or next-game queue; any prior scoreboard team/list name is restored when possible.
 
 ## Field
@@ -45,6 +48,8 @@ The shooter receives a very short collision grace period so the ball can leave t
 - **Single-layer** field surface.
 - 5-block-wide blue and red goal frames.
 - Full glass enclosure with walls and a roof to keep the ball in play.
+- The ball explicitly rebounds from the glass instead of dying against the wall; rebound energy is configurable.
+- The arena is a no-spawn zone for mobs, and stray living mobs inside it are cleared before play.
 - Closed iron entrance door on the west side with a protected stone-brick exit pad.
 - Arena blocks cannot be broken or replaced by players, and explosions cannot damage the arena.
 - Field construction is batched across ticks.
@@ -69,7 +74,7 @@ Players:
 /leave
 ```
 
-`/soccer` starts or joins matchmaking. During an open lobby, players can type `play` in normal chat to join. During a running game, typing `play` queues the player for the next game and teleports them to the spectator pad outside the cage. `/leave` exits the lobby/game/queue and returns the player to the protected pad.
+`/soccer` starts or joins matchmaking. During an open lobby, players can type `play` in normal chat to join. During a running game, typing `play` joins the current match while it has fewer than six players. Once the match is full, later players queue for the next game and spectate from outside the cage. `/leave` exits the lobby/game/queue and returns the player to the protected pad.
 
 Operators:
 
@@ -88,5 +93,5 @@ The project targets Java 21 and Paper 1.21.11.
 GitHub Actions builds:
 
 ```text
-dist/EaglerSoccer-1.5.0.jar
+dist/EaglerSoccer-1.6.0.jar
 ```

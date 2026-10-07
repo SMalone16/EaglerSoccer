@@ -25,13 +25,19 @@ The visible ball is a size-1 slime for Eaglercraft 1.12.2 compatibility, but the
 
 The shooter receives a very short collision grace period so the ball can leave their feet instead of immediately stopping against the player who kicked it.
 
-## Teams
+## Matchmaking and teams
 
-- Entering with `/soccer` assigns the player to **Red** or **Blue**.
-- The plugin keeps the teams as even as possible and randomly chooses when the counts are tied.
+- `/soccer` opens a **10-second lobby**. The player who runs the command is automatically player 1.
+- Everyone online sees a chat prompt to type **play** to join.
+- Chat reports the current player count out of **6** whenever someone joins and during the final countdown.
+- The game starts when the timer expires or immediately at **6/6**.
+- Teams are assigned only at kickoff and are kept as even as possible: 3v3, 3v2, 2v2, 2v1, or 1v1.
+- Late players who type **play** during a game enter the next-game queue and are moved to the protected spectator pad outside the glass.
+- The stadium iron door is forced closed and cannot be opened while a lobby or game is active.
+- Games default to **5 minutes or first to 5 goals**, whichever comes first. Both values are configurable.
+- When a game ends, queued players automatically open the next 10-second lobby.
 - Player nameplates use a red or blue scoreboard-team prefix, and the tab list shows `[RED]` or `[BLUE]`.
-- A large team title is shown on entry for immediate feedback.
-- `/leave` or disconnecting removes the Soccer assignment; any prior scoreboard team/list name is restored when possible.
+- `/leave` or disconnecting removes the player from the lobby, active match, or next-game queue; any prior scoreboard team/list name is restored when possible.
 
 ## Field
 
@@ -63,7 +69,7 @@ Players:
 /leave
 ```
 
-`/soccer` enters just inside the cage door. `/leave` returns you to the protected pad directly outside that door.
+`/soccer` starts or joins matchmaking. During an open lobby, players can type `play` in normal chat to join. During a running game, typing `play` queues the player for the next game and teleports them to the spectator pad outside the cage. `/leave` exits the lobby/game/queue and returns the player to the protected pad.
 
 Operators:
 
@@ -82,5 +88,5 @@ The project targets Java 21 and Paper 1.21.11.
 GitHub Actions builds:
 
 ```text
-dist/EaglerSoccer-1.4.0.jar
+dist/EaglerSoccer-1.5.0.jar
 ```

@@ -19,6 +19,16 @@ cage-height: 6
 active-radius: 48
 soccer-task-period-ticks: 1
 
+# Matchmaking. /soccer starts a 10-second lobby and the initiator is player 1.
+# Other players type "play" in chat. A game starts early at 6/6.
+max-match-players: 6
+lobby-countdown-seconds: 10
+
+# A queued next game needs a defined ending condition. The current game ends
+# when this timer expires or either team reaches the score limit.
+match-duration-seconds: 300
+score-limit: 5
+
 # Field construction is spread across server ticks.
 build-blocks-per-tick: 180
 
